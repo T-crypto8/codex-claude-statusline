@@ -28,6 +28,22 @@
 
 **Codex CLI と Claude Code を並用する**メンテナー / AIコーディングのパワーユーザー向け。コスト・コンテキスト消費・残り枠・並走エージェントの状態は、レビューや triage・リリース作業の組み立てに直結します。それを1画面・ローカル完結・依存ゼロで見えるようにします。
 
+## AIエージェント向けクイックスタート
+
+Claude Code / Codex CLI を使ってるなら、このブロックを貼るだけでエージェントが設定まで終わらせます:
+
+```text
+codex-claude-statusline をセットアップして:
+1. git clone https://github.com/T-crypto8/codex-claude-statusline.git ~/.claude-statusline
+2. ~/.claude/settings.json に {"statusLine": {"type": "command", "command": "python3 ~/.claude-statusline/statusline.py"}}
+   を既存キーを保持したままマージ
+3. mkdir -p ~/.config/claude-statusline して config.example.json を config.json としてコピー
+4. mask_patterns に入れるべき文字列(本名・社名・案件名)を私に確認してから設定
+5. 検証: `echo '{}' | python3 ~/.claude-statusline/statusline.py` が5行をエラーなく出すこと。
+   Codex のみの利用なら settings.json は触らず lines.cost を false にして
+   standalone の watch コマンドを提示して。
+```
+
 ## インストール
 
 Python 3.10+ のみ。外部パッケージ不要。

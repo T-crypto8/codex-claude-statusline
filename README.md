@@ -28,6 +28,23 @@ Costs are estimates at API list prices — on a subscription plan they are a rel
 
 Maintainers and power users who run **Codex CLI and Claude Code side by side** on AI-assisted development: cost visibility, context usage, remaining quota, and parallel agent sessions directly affect how you plan review, triage, and release work. This cockpit keeps all of it in one glance, locally, with zero dependencies.
 
+## AI agent quickstart
+
+Working with Claude Code or Codex CLI? Paste this block and the agent does the rest:
+
+```text
+Install codex-claude-statusline for me:
+1. git clone https://github.com/T-crypto8/codex-claude-statusline.git ~/.claude-statusline
+2. Merge {"statusLine": {"type": "command", "command": "python3 ~/.claude-statusline/statusline.py"}}
+   into ~/.claude/settings.json, preserving all existing keys.
+3. mkdir -p ~/.config/claude-statusline and copy config.example.json there as config.json
+4. Ask me which strings to put in mask_patterns (my name, company, client names),
+   then set them in the config.
+5. Verify: `echo '{}' | python3 ~/.claude-statusline/statusline.py` must print 5 lines
+   without errors. If I use Codex only, set lines.cost to false and show me the
+   standalone `watch` command instead of editing settings.json.
+```
+
 ## Install
 
 Requires Python 3.10+. No third-party packages.
