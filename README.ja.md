@@ -1,6 +1,10 @@
 # codex-claude-statusline
 
-[Claude Code](https://claude.com/claude-code) のターミナル下部を「計器盤」にする多段ステータスラインです。
+[![CI](https://github.com/T-crypto8/codex-claude-statusline/actions/workflows/ci.yml/badge.svg)](https://github.com/T-crypto8/codex-claude-statusline/actions/workflows/ci.yml)
+
+[Claude Code](https://claude.com/claude-code) と [Codex CLI](https://github.com/openai/codex) のターミナル下部を「計器盤」にする多段ステータスラインです。
+
+![screenshot](assets/screenshot.svg)
 
 ```
 🐶 📁my-repo │ 🌿 main
@@ -19,6 +23,10 @@
 | 5 | 並走中の他の Claude Code セッションと直近の指示 | `~/.claude/sessions` |
 
 コストは API 定価ベースの推定値です。サブスクプランでは請求額ではなく「相対的な消費量の目安」として使ってください。未知のモデルはあえて最高単価で計上します(過小評価で安心してしまうより、過大側に倒す設計)。
+
+## 想定ユーザー
+
+**Codex CLI と Claude Code を並用する**メンテナー / AIコーディングのパワーユーザー向け。コスト・コンテキスト消費・残り枠・並走エージェントの状態は、レビューや triage・リリース作業の組み立てに直結します。それを1画面・ローカル完結・依存ゼロで見えるようにします。
 
 ## インストール
 

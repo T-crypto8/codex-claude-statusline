@@ -1,6 +1,10 @@
 # codex-claude-statusline
 
-A multi-line status line for [Claude Code](https://claude.com/claude-code) that turns the bottom of your terminal into a cockpit:
+[![CI](https://github.com/T-crypto8/codex-claude-statusline/actions/workflows/ci.yml/badge.svg)](https://github.com/T-crypto8/codex-claude-statusline/actions/workflows/ci.yml)
+
+A multi-line status line for [Claude Code](https://claude.com/claude-code) and [Codex CLI](https://github.com/openai/codex) that turns the bottom of your terminal into a cockpit:
+
+![screenshot](assets/screenshot.svg)
 
 ```
 🐶 📁my-repo │ 🌿 main
@@ -19,6 +23,10 @@ A multi-line status line for [Claude Code](https://claude.com/claude-code) that 
 | 5 | other live Claude Code sessions and what they're doing | `~/.claude/sessions` registry |
 
 Costs are estimates at API list prices — on a subscription plan they are a relative gauge, not a bill. Unknown models are priced at the most expensive tier on purpose (estimates err high, never silently low).
+
+## Who is this for
+
+Maintainers and power users who run **Codex CLI and Claude Code side by side** on AI-assisted development: cost visibility, context usage, remaining quota, and parallel agent sessions directly affect how you plan review, triage, and release work. This cockpit keeps all of it in one glance, locally, with zero dependencies.
 
 ## Install
 

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="190" viewBox="0 0 760 190">
+  <rect width="760" height="190" rx="10" fill="#1e1e2e"/>
+  <circle cx="22" cy="20" r="6" fill="#f38ba8"/>
+  <circle cx="42" cy="20" r="6" fill="#f9e2af"/>
+  <circle cx="62" cy="20" r="6" fill="#a6e3a1"/>
+  <g font-family="SF Mono, Menlo, Consolas, monospace" font-size="14">
+    <text x="20" y="58" fill="#cdd6f4">🐶 📁my-repo <tspan fill="#585b70">│</tspan> 🌿 main</text>
+    <text x="20" y="84" fill="#cdd6f4">🤖Opus 4.8 <tspan fill="#585b70">│</tspan> 📈42% <tspan fill="#585b70">│</tspan> 🕐5h 31% ↺18:00 <tspan fill="#585b70">│</tspan> 📅7d 67% ↺6/14 09:00</text>
+    <text x="20" y="110" fill="#cdd6f4">🐾 Codex <tspan fill="#585b70">│</tspan> 🕐5h 12% ↺19:30 <tspan fill="#585b70">│</tspan> 📅7d 48% ↺6/15 11:00 <tspan fill="#585b70">│</tspan> ≈$3.21・1.2Mtok (session)</text>
+    <text x="20" y="136" fill="#cdd6f4">💰Claude $1.84・890ktok (session) <tspan fill="#585b70">│</tspan> $12.40・8.1Mtok (daily)</text>
+    <text x="20" y="162" fill="#cdd6f4">🤝parallel2: <tspan fill="#a6e3a1">●</tspan>fixing the flaky test <tspan fill="#6c7086">○</tspan>docs review</text>
+  </g>
+</svg>
