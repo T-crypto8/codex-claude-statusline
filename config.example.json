@@ -1,0 +1,47 @@
+{
+  "icons": {
+    "prefix": "🐶",
+    "dir": "📁",
+    "branch": "🌿",
+    "model": "🤖",
+    "context": "📈",
+    "limit_5h": "🕐",
+    "limit_7d": "📅",
+    "codex": "🐾",
+    "cost": "💰",
+    "parallel": "🤝",
+    "busy": "●",
+    "idle": "○",
+    "reset": "↺"
+  },
+  "labels": {
+    "session": "session",
+    "daily": "daily",
+    "recovered": "0% (recovered)",
+    "no_parallel": "solo",
+    "parallel": "parallel"
+  },
+  "lines": {
+    "codex": true,
+    "cost": true,
+    "parallel": true
+  },
+  "currency": {
+    "code": "USD",
+    "symbol": "$",
+    "fallback_rate": 1.0
+  },
+  "separator": " │ ",
+  "mask_patterns": ["your-real-name", "your-company-name"],
+  "mask_replacement": "＊",
+  "codex_pricing": {
+    "input": 1.25,
+    "cached_input": 0.125,
+    "output": 10.0
+  },
+  "cache_ttl": {
+    "fx_hours": 12,
+    "daily_seconds": 60,
+    "codex_seconds": 120
+  }
+}

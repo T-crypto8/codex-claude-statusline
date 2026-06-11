@@ -1,0 +1,499 @@
+#!/usr/bin/env python3
+"""Multi-line status line for Claude Code.
+
+Reads the statusLine JSON payload from stdin and renders up to 5 lines:
+
+  1: 🐶 📁 cwd │ 🌿 git branch
+  2: 🤖 model │ 📈 context% │ 🕐 5h limit ↺reset │ 📅 7d limit ↺reset
+  3: 🐾 Codex CLI remaining quota + estimated session cost (optional)
+  4: 💰 Claude session cost/tokens │ daily cost/tokens
+  5: 🤝 parallel Claude Code sessions (optional)
+
+Everything (emoji, labels, currency, masking, which lines render) is
+configurable via a JSON config file. See config.example.json.
+
+Config resolution order:
+  $CLAUDE_STATUSLINE_CONFIG > ~/.config/claude-statusline/config.json > defaults
+
+Design constraints: the status line is invoked frequently, so anything
+expensive (daily cost scan, FX rate, Codex session scan) is cached under a
+temp directory. Network failures and missing files degrade to "—" instead
+of dropping a whole line.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime
+from pathlib import Path
+
+# --- configuration ----------------------------------------------------------
+
+DEFAULTS: dict = {
+    "icons": {
+        "prefix": "\U0001f436",      # 🐶  the mascot — change me!
+        "dir": "\U0001f4c1",         # 📁
+        "branch": "\U0001f33f",      # 🌿
+        "model": "\U0001f916",       # 🤖
+        "context": "\U0001f4c8",     # 📈
+        "limit_5h": "\U0001f550",    # 🕐
+        "limit_7d": "\U0001f4c5",    # 📅
+        "codex": "\U0001f43e",       # 🐾
+        "cost": "\U0001f4b0",        # 💰
+        "parallel": "\U0001f91d",    # 🤝
+        "busy": "●",            # ●
+        "idle": "○",            # ○
+        "reset": "↺",           # ↺
+    },
+    "labels": {
+        "session": "session",
+        "daily": "daily",
+        "recovered": "0% (recovered)",
+        "no_parallel": "solo",
+        "parallel": "parallel",
+    },
+    "lines": {
+        "codex": True,      # line 3: Codex CLI quota/cost (needs ~/.codex)
+        "cost": True,       # line 4: Claude cost estimate
+        "parallel": True,   # line 5: parallel sessions
+    },
+    "currency": {
+        "code": "USD",      # "USD" renders as-is; anything else converts
+        "symbol": "$",
+        "fallback_rate": 1.0,   # used when the FX API is unreachable
+    },
+    "separator": " │ ",    # " │ "
+    # Strings to redact from the rendered output (for screenshot safety).
+    # Example: ["my-real-name", "my-company"]
+    "mask_patterns": [],
+    "mask_replacement": "＊",  # ＊
+    # Codex pricing (USD per 1M tokens) used for the rough session estimate.
+    "codex_pricing": {"input": 1.25, "cached_input": 0.125, "output": 10.0},
+    "cache_ttl": {"fx_hours": 12, "daily_seconds": 60, "codex_seconds": 120},
+}
+
+CACHE_DIR = Path(tempfile.gettempdir()) / "claude-statusline"
+CODEX_SESS_DIR = Path.home() / ".codex" / "sessions"
+CLAUDE_SESS_DIR = Path.home() / ".claude" / "sessions"
+CLAUDE_PROJ_DIR = Path.home() / ".claude" / "projects"
+USAGE_TOOL = Path(__file__).resolve().parent / "usage_estimate.py"
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    out = dict(base)
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def load_config() -> dict:
+    candidates = []
+    env_path = os.environ.get("CLAUDE_STATUSLINE_CONFIG")
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.append(Path.home() / ".config" / "claude-statusline" / "config.json")
+    for path in candidates:
+        try:
+            return _deep_merge(DEFAULTS, json.loads(path.read_text()))
+        except (OSError, ValueError):
+            continue
+    return DEFAULTS
+
+
+CFG = load_config()
+ICON = CFG["icons"]
+LABEL = CFG["labels"]
+SEP = CFG["separator"]
+
+
+# --- small utilities ---------------------------------------------------------
+
+def _read_cache(path: Path, ttl: float) -> dict | None:
+    try:
+        raw = json.loads(path.read_text())
+        if time.time() - raw.get("_at", 0) <= ttl:
+            return raw
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _write_cache(path: Path, payload: dict) -> None:
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({**payload, "_at": time.time()}))
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
+def _tail_text(path: Path, max_bytes: int) -> str:
+    with open(path, "rb") as fh:
+        fh.seek(0, 2)
+        fh.seek(max(0, fh.tell() - max_bytes))
+        return fh.read().decode("utf-8", "replace")
+
+
+def sanitize(text: str) -> str:
+    for pat in CFG["mask_patterns"]:
+        text = re.sub(re.escape(pat), CFG["mask_replacement"], text, flags=re.I)
+    return text
+
+
+def fx_rate() -> float:
+    """USD -> configured currency. Returns 1.0 when currency is USD."""
+    code = CFG["currency"]["code"].upper()
+    if code == "USD":
+        return 1.0
+    cache = CACHE_DIR / f"fx_{code}.json"
+    cached = _read_cache(cache, CFG["cache_ttl"]["fx_hours"] * 3600)
+    if cached:
+        return cached["rate"]
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen(
+            f"https://api.frankfurter.app/latest?from=USD&to={code}", timeout=1.5
+        ) as resp:
+            rate = float(json.load(resp)["rates"][code])
+        _write_cache(cache, {"rate": rate})
+        return rate
+    except Exception:
+        try:  # an expired cached real rate beats the static fallback
+            return json.loads(cache.read_text())["rate"]
+        except (OSError, ValueError, KeyError):
+            return float(CFG["currency"]["fallback_rate"])
+
+
+def daily_usage() -> tuple[float | None, int | None]:
+    """Today's Claude total (usd, tokens) via usage_estimate.py, cached."""
+    cache = CACHE_DIR / "daily_cost.json"
+    cached = _read_cache(cache, CFG["cache_ttl"]["daily_seconds"])
+    if cached:
+        return cached.get("usd"), cached.get("tok")
+    usd: float | None = None
+    tok: int | None = None
+    try:
+        out = subprocess.run(
+            [sys.executable, str(USAGE_TOOL), "--today", "--json"],
+            capture_output=True, text=True, timeout=8,
+        )
+        if out.returncode == 0:
+            d = json.loads(out.stdout)
+            usd = float(d["estimated_cost_usd"])
+            tok = int(d.get("total_tokens") or 0)
+    except Exception:
+        usd, tok = None, None
+    if usd is not None:
+        _write_cache(cache, {"usd": usd, "tok": tok})
+    return usd, tok
+
+
+def git_branch(cwd: str) -> str | None:
+    try:
+        out = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=2,
+        )
+        branch = out.stdout.strip()
+        return branch if out.returncode == 0 and branch else None
+    except Exception:
+        return None
+
+
+# --- Codex CLI quota + session usage -----------------------------------------
+
+def parse_codex_snapshot(lines: list[str]) -> dict | None:
+    """Last valid rate_limits from a Codex rollout jsonl (primary may be null)."""
+    for line in reversed(lines):
+        if '"rate_limits"' not in line or '"primary"' not in line:
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        rl = (d.get("payload") or {}).get("rate_limits") or {}
+        if isinstance(rl.get("primary"), dict):
+            return {"primary": rl["primary"], "secondary": rl.get("secondary")}
+    return None
+
+
+def parse_codex_usage(lines: list[str]) -> dict | None:
+    for line in reversed(lines):
+        if '"total_token_usage"' not in line:
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        info = (d.get("payload") or {}).get("info") or {}
+        usage = info.get("total_token_usage")
+        if isinstance(usage, dict):
+            return usage
+    return None
+
+
+def codex_status() -> tuple[dict | None, dict | None]:
+    cache = CACHE_DIR / "codex_limits.json"
+    cached = _read_cache(cache, CFG["cache_ttl"]["codex_seconds"])
+    if cached:
+        return cached.get("snap"), cached.get("usage")
+    snap = usage = None
+    try:
+        files = sorted(
+            CODEX_SESS_DIR.glob("*/*/*/rollout-*.jsonl"),
+            key=lambda p: p.stat().st_mtime, reverse=True,
+        )[:8]
+        for f in files:
+            lines = _tail_text(f, 200_000).splitlines()
+            snap = snap or parse_codex_snapshot(lines)
+            usage = usage or parse_codex_usage(lines)
+            if snap and usage:
+                break
+    except OSError:
+        pass
+    _write_cache(cache, {"snap": snap, "usage": usage})
+    return snap, usage
+
+
+def codex_cost_usd(usage: dict) -> float:
+    p = CFG["codex_pricing"]
+    inp = usage.get("input_tokens", 0)
+    cached = min(usage.get("cached_input_tokens", 0), inp)
+    out = usage.get("output_tokens", 0)
+    return ((inp - cached) * p["input"] + cached * p["cached_input"] + out * p["output"]) / 1e6
+
+
+def fmt_codex(snap: dict | None, usage: dict | None, rate: float) -> str:
+    parts = [f"{ICON['codex']} Codex"]
+    if not snap:
+        parts[0] += " —"
+    else:
+        now = time.time()
+        for icon, label, key in (
+            (ICON["limit_5h"], "5h", "primary"),
+            (ICON["limit_7d"], "7d", "secondary"),
+        ):
+            block = snap.get(key)
+            if not isinstance(block, dict):
+                continue
+            resets = block.get("resets_at") or 0
+            if resets and now > resets:
+                # window has rolled over: fully recovered; next reset date is
+                # unknown until the next request starts a new rolling window
+                parts.append(f"{icon}{label} {LABEL['recovered']}")
+            else:
+                reset_s = fmt_reset(resets)
+                parts.append(
+                    f"{icon}{label} {block.get('used_percent', 0):.0f}%"
+                    f"{(' ' + reset_s) if reset_s else ''}"
+                )
+    if usage:
+        tok = usage.get("total_tokens") or (
+            usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
+        )
+        parts.append(fmt_cost_tok(codex_cost_usd(usage), tok, rate, LABEL["session"], approx=True))
+    else:
+        parts.append(fmt_cost_tok(None, None, rate, LABEL["session"]))
+    return SEP.join(parts)
+
+
+# --- parallel sessions --------------------------------------------------------
+
+def clean_text(content: object) -> str:
+    """Displayable text from a transcript user message (strip tags/injections)."""
+    if isinstance(content, list):
+        content = " ".join(
+            b.get("text", "") for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    if not isinstance(content, str):
+        return ""
+    t = re.sub(r"<system-reminder>.*?</system-reminder>", " ", content, flags=re.S)
+    t = re.sub(r"<command-name>\s*(.*?)\s*</command-name>", r"\1", t, flags=re.S)
+    t = re.sub(r"<local-command-(stdout|caveat)>.*?</local-command-\1>", " ", t, flags=re.S)
+    t = re.sub(r"<[^>]*>[^<]*</[^>]*>", " ", t, flags=re.S)
+    t = re.sub(r"<[^>]+>", " ", t)
+    return " ".join(t.split())
+
+
+def _project_dir(cwd: str) -> Path:
+    return CLAUDE_PROJ_DIR / re.sub(r"[^A-Za-z0-9]", "-", cwd)
+
+
+def last_user_snippet(cwd: str, session_id: str) -> str:
+    p = _project_dir(cwd) / f"{session_id}.jsonl"
+    if not p.exists():
+        return ""
+    last_any, last_substantive = "", ""
+    try:
+        for line in _tail_text(p, 64_000).splitlines():
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if d.get("type") != "user" or d.get("isSidechain"):
+                continue
+            t = clean_text((d.get("message") or {}).get("content"))
+            if not t:
+                continue
+            last_any = t
+            if not t.startswith("/"):  # prefer real instructions over slash commands
+                last_substantive = t
+    except OSError:
+        pass
+    return last_substantive or last_any
+
+
+def parallel_sessions(own_session_id: str) -> list[dict]:
+    out: list[dict] = []
+    try:
+        files = list(CLAUDE_SESS_DIR.glob("*.json"))
+    except OSError:
+        return out
+    for f in files:
+        try:
+            d = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        sid = d.get("sessionId")
+        if not sid or sid == own_session_id:
+            continue
+        try:
+            os.kill(int(d["pid"]), 0)  # liveness probe only (signal 0)
+        except Exception:
+            continue
+        if time.time() - d.get("updatedAt", 0) / 1000 > 86400:
+            continue  # stale registry entry attached to a recycled pid
+        cwd = d.get("cwd") or ""
+        label = last_user_snippet(cwd, sid) or Path(cwd or "?").name
+        out.append({"busy": d.get("status") == "busy", "label": label})
+    return out
+
+
+def _trunc(s: str, n: int) -> str:
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def fmt_parallel(sessions: list[dict]) -> str:
+    if not sessions:
+        return f"{ICON['parallel']}{LABEL['no_parallel']}"
+    items = " ".join(
+        (ICON["busy"] if s["busy"] else ICON["idle"]) + _trunc(s["label"], 20)
+        for s in sessions[:4]
+    )
+    return f"{ICON['parallel']}{LABEL['parallel']}{len(sessions)}: {items}"
+
+
+# --- rendering ----------------------------------------------------------------
+
+def fmt_reset(epoch: object) -> str:
+    if not isinstance(epoch, (int, float)) or epoch <= 0:
+        return ""
+    dt = datetime.fromtimestamp(epoch)
+    if dt.date() == datetime.now().date():
+        return f"{ICON['reset']}{dt:%H:%M}"
+    return f"{ICON['reset']}{dt.month}/{dt.day} {dt:%H:%M}"
+
+
+def fmt_limit(icon: str, label: str, block: dict | None) -> str | None:
+    if not isinstance(block, dict):
+        return None
+    pct = block.get("used_percentage")
+    if pct is None:
+        return None
+    reset = fmt_reset(block.get("resets_at"))
+    return f"{icon}{label} {pct:.0f}%{(' ' + reset) if reset else ''}"
+
+
+def fmt_tok(tok: int | None) -> str:
+    if tok is None:
+        return "—tok"
+    if tok >= 1_000_000:
+        return f"{tok / 1e6:.1f}Mtok"
+    if tok >= 1_000:
+        return f"{tok / 1e3:.0f}ktok"
+    return f"{tok}tok"
+
+
+def fmt_cost_tok(usd: float | None, tok: int | None, rate: float, label: str,
+                 approx: bool = False) -> str:
+    sym = CFG["currency"]["symbol"]
+    if usd is None:
+        cost = f"{sym}—"
+    else:
+        amount = usd * rate
+        cost = f"{sym}{amount:,.0f}" if rate != 1.0 else f"{sym}{amount:,.2f}"
+        if approx:
+            cost = "≈" + cost
+    return f"{cost}・{fmt_tok(tok)} ({label})"
+
+
+def main() -> int:
+    # Standalone mode (no stdin payload): works without Claude Code, e.g. for
+    # Codex CLI users — run `python3 statusline.py` directly, or keep it live
+    # with `watch -n 30 python3 statusline.py` / a tmux pane.
+    if sys.stdin.isatty():
+        data = {}
+    else:
+        try:
+            data = json.load(sys.stdin)
+        except ValueError:
+            data = {}
+
+    cwd = (data.get("workspace") or {}).get("current_dir") or str(Path.cwd())
+    dir_name = "~" if cwd == str(Path.home()) else Path(cwd).name
+    line1 = [f"{ICON['prefix']} {ICON['dir']}{dir_name}"]
+    branch = git_branch(cwd)
+    if branch:
+        line1.append(f"{ICON['branch']} {branch}")
+
+    model = (data.get("model") or {}).get("display_name") or "?"
+    line2 = [f"{ICON['model']}{model}"]
+    cw = data.get("context_window") or {}
+    ctx_pct = cw.get("used_percentage")
+    line2.append(
+        f"{ICON['context']}{ctx_pct:.0f}%" if ctx_pct is not None else f"{ICON['context']}—"
+    )
+    limits = data.get("rate_limits") or {}
+    for part in (
+        fmt_limit(ICON["limit_5h"], "5h", limits.get("five_hour")),
+        fmt_limit(ICON["limit_7d"], "7d", limits.get("seven_day")),
+    ):
+        if part:
+            line2.append(part)
+
+    lines = [SEP.join(line1), SEP.join(line2)]
+
+    rate = fx_rate()
+    if CFG["lines"]["codex"]:
+        snap, usage = codex_status()
+        lines.append(fmt_codex(snap, usage, rate))
+    if CFG["lines"]["cost"]:
+        session_usd = (data.get("cost") or {}).get("total_cost_usd")
+        session_tok = None
+        if "total_input_tokens" in cw or "total_output_tokens" in cw:
+            session_tok = (cw.get("total_input_tokens") or 0) + (cw.get("total_output_tokens") or 0)
+        daily_usd, daily_tok = daily_usage()
+        lines.append(SEP.join([
+            f"{ICON['cost']}Claude " + fmt_cost_tok(session_usd, session_tok, rate, LABEL["session"]),
+            fmt_cost_tok(daily_usd, daily_tok, rate, LABEL["daily"]),
+        ]))
+    if CFG["lines"]["parallel"]:
+        lines.append(fmt_parallel(parallel_sessions(data.get("session_id") or "")))
+
+    print(sanitize("\n".join(lines)))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
