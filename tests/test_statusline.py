@@ -78,5 +78,58 @@ class TestCodexParsers(unittest.TestCase):
         self.assertAlmostEqual(sl.codex_cost_usd(usage), expected)
 
 
+class TestSessionCostAfterClear(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self._orig_cache = sl.CACHE_DIR
+        sl.CACHE_DIR = self.tmp
+
+    def tearDown(self):
+        sl.CACHE_DIR = self._orig_cache
+        self._tmp.cleanup()
+
+    @staticmethod
+    def _clear_line(uuid: str) -> str:
+        return json.dumps({
+            "type": "user", "uuid": uuid,
+            "message": {"role": "user", "content": "<command-name>/clear</command-name>"},
+        })
+
+    def test_resets_after_clear_marker(self):
+        transcript = self.tmp / "t1.jsonl"
+        transcript.write_text(json.dumps({"type": "user", "message": {"content": "hi"}}) + "\n")
+        data = {"session_id": "sid-1", "transcript_path": str(transcript)}
+
+        self.assertEqual(sl.session_cost_after_clear(data, 1.0), 1.0)
+        self.assertEqual(sl.session_cost_after_clear(data, 1.5), 1.5)
+
+        with transcript.open("a") as fh:
+            fh.write(self._clear_line("u-clear-1") + "\n")
+        self.assertEqual(sl.session_cost_after_clear(data, 1.5), 0.0)
+        self.assertAlmostEqual(sl.session_cost_after_clear(data, 1.8), 0.3)
+        # same marker on later renders: no re-reset
+        self.assertAlmostEqual(sl.session_cost_after_clear(data, 2.5), 1.0)
+
+        with transcript.open("a") as fh:
+            fh.write(self._clear_line("u-clear-2") + "\n")
+        self.assertEqual(sl.session_cost_after_clear(data, 2.5), 0.0)
+
+    def test_resets_on_transcript_path_change(self):
+        t1 = self.tmp / "t1.jsonl"
+        t2 = self.tmp / "t2.jsonl"
+        for t in (t1, t2):
+            t.write_text(json.dumps({"type": "user", "message": {"content": "hi"}}) + "\n")
+        self.assertEqual(sl.session_cost_after_clear(
+            {"session_id": "sid-2", "transcript_path": str(t1)}, 3.0), 3.0)
+        self.assertAlmostEqual(sl.session_cost_after_clear(
+            {"session_id": "sid-2", "transcript_path": str(t2)}, 3.2), 0.2)
+
+    def test_passthrough_without_sid_or_cost(self):
+        self.assertEqual(sl.session_cost_after_clear({}, 1.0), 1.0)
+        self.assertIsNone(sl.session_cost_after_clear({"session_id": "x"}, None))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,3 +1,4 @@
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -92,6 +93,56 @@ class TestExtractUsage(unittest.TestCase):
     def test_missing_usage_returns_empty(self):
         model, usage = ue._extract_usage({"model": "x"})
         self.assertEqual(usage, {})
+
+
+class TestRowTimestampDating(unittest.TestCase):
+    """Long-lived sessions: rows are dated by their own timestamps, not file mtime."""
+
+    def test_multiday_session_split_and_today_cutoff(self):
+        import os
+        import tempfile
+        from datetime import datetime, timezone
+
+        def _iso_utc(local_dt):
+            return local_dt.astimezone().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+        def _assistant(ts):
+            return {
+                "type": "assistant", "timestamp": ts,
+                "message": {
+                    "model": "claude-sonnet-4-6", "role": "assistant",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "usage": {"input_tokens": 100, "output_tokens": 100,
+                              "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_dir = root / "-Users-someone-proj"
+            project_dir.mkdir()
+            session_path = project_dir / "longlived.jsonl"
+            lines = [
+                _assistant(_iso_utc(datetime(2026, 6, 11, 23, 0))),
+                _assistant(_iso_utc(datetime(2026, 6, 12, 9, 0))),
+            ]
+            session_path.write_text("\n".join(json.dumps(x) for x in lines), encoding="utf-8")
+            noon = datetime(2026, 6, 12, 12, 0).timestamp()
+            os.utime(session_path, (noon, noon))
+
+            orig_root = ue.PROJECTS_ROOT
+            ue.PROJECTS_ROOT = root
+            try:
+                rows, _w, count = ue.collect_usage(cutoff=datetime(2026, 6, 12, 0, 0, 0))
+                self.assertEqual(count, 1)
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0].session_date, "2026-06-12")
+
+                rows_all, _w2, _c2 = ue.collect_usage()
+                self.assertEqual(sorted(r.session_date for r in rows_all),
+                                 ["2026-06-11", "2026-06-12"])
+            finally:
+                ue.PROJECTS_ROOT = orig_root
 
 
 if __name__ == "__main__":

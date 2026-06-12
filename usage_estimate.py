@@ -160,12 +160,31 @@ def estimate_cost(model: str | None, usage: dict[str, int]) -> tuple[float, bool
     )
 
 
+def _row_datetime(data: dict[str, Any], mtime: datetime) -> datetime:
+    """Per-record timestamp (UTC ISO) as local naive datetime; file mtime fallback.
+
+    Attributing a whole file to its mtime date makes long-lived sessions
+    (spanning midnight) dump yesterday's usage into "today", so daily totals
+    never appear to reset. Dating each record individually fixes that.
+    """
+    ts = data.get("timestamp")
+    if isinstance(ts, str):
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            return mtime
+        if dt.tzinfo is not None:
+            dt = dt.astimezone().replace(tzinfo=None)
+        return dt
+    return mtime
+
+
 def parse_session_file(
     jsonl_path: Path,
     project_name: str,
     mtime: datetime,
+    cutoff: datetime | None = None,
 ) -> tuple[list[SessionUsage], set[str]]:
-    session_date = mtime.strftime("%Y-%m-%d")
     session_key = jsonl_path.stem
     rows: list[SessionUsage] = []
     warnings: set[str] = set()
@@ -181,6 +200,10 @@ def parse_session_file(
             message = data.get("message")
             if not isinstance(message, dict):
                 continue
+            row_dt = _row_datetime(data, mtime)
+            if cutoff and row_dt < cutoff:
+                continue
+            session_date = row_dt.strftime("%Y-%m-%d")
             model, usage = _extract_usage(message)
             if not usage or not any(usage.values()):
                 continue  # all-zero rows (synthetic messages) are noise
@@ -213,7 +236,7 @@ def collect_usage(
     session_count = 0
     for project_name, jsonl_path, mtime in iter_session_files(cutoff, project_filter):
         session_count += 1
-        parsed_rows, parsed_warnings = parse_session_file(jsonl_path, project_name, mtime)
+        parsed_rows, parsed_warnings = parse_session_file(jsonl_path, project_name, mtime, cutoff)
         rows.extend(parsed_rows)
         warnings.update(parsed_warnings)
     return rows, sorted(warnings), session_count

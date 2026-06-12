@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.2.0 — 2026-06-12
+
+- **Session cost now resets on `/clear`.** `cost.total_cost_usd` from Claude
+  Code is a process-lifetime accumulator and never resets on `/clear`; the
+  statusline now detects `/clear` (new clear record in the transcript, or a
+  transcript path switch, tracked per `session_id`) and shows the cost
+  relative to that point.
+- **Daily cost now resets at local midnight.** Usage rows are dated by their
+  own message timestamps (UTC → local) instead of attributing whole transcript
+  files to their mtime date — long-lived sessions spanning midnight no longer
+  leak yesterday's usage into today's total.
+- 4 new regression tests (23 total).
+
 ## v0.1.0 — 2026-06-11
 
 Initial public release.

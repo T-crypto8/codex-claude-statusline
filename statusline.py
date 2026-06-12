@@ -210,6 +210,67 @@ def git_branch(cwd: str) -> str | None:
         return None
 
 
+# --- /clear-aware session cost -------------------------------------------------
+
+def _last_clear_marker(transcript_path: str) -> str | None:
+    """Identifier of the most recent /clear record in the transcript tail, if any."""
+    if not transcript_path:
+        return None
+    try:
+        lines = _tail_text(Path(transcript_path), 48_000).splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        if "<command-name>/clear" not in line:
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if d.get("type") != "user":
+            continue
+        return str(d.get("uuid") or d.get("timestamp") or "clear")
+    return None
+
+
+def session_cost_after_clear(data: dict, total_usd: float | None) -> float | None:
+    """Show session cost relative to the last /clear.
+
+    cost.total_cost_usd never resets on /clear (official docs: "Accumulates the
+    estimated cost of all API calls in the current session", i.e. the process).
+    Detect /clear per session_id — either a new /clear record in the transcript
+    or a transcript_path switch — and save the preceding value as the baseline.
+    """
+    sid = data.get("session_id") or ""
+    if total_usd is None or not sid:
+        return total_usd
+    safe_sid = re.sub(r"[^A-Za-z0-9_-]", "", sid)[:64]
+    cache = CACHE_DIR / f"session_base_{safe_sid}.json"
+    transcript = data.get("transcript_path") or ""
+    marker = _last_clear_marker(transcript)
+    ent: dict | None = None
+    try:
+        ent = json.loads(cache.read_text())
+    except (OSError, ValueError):
+        pass
+    if not isinstance(ent, dict):
+        ent = {"base": 0.0, "prev": total_usd, "marker": marker, "transcript": transcript}
+    else:
+        prev_transcript = ent.get("transcript") or ""
+        if (transcript and prev_transcript and transcript != prev_transcript) or (
+            marker and marker != ent.get("marker")
+        ):
+            # value at the render just before /clear ~= cost at clear time
+            ent["base"] = float(ent.get("prev") or 0.0)
+        if marker:
+            ent["marker"] = marker
+        if transcript:
+            ent["transcript"] = transcript
+        ent["prev"] = total_usd
+    _write_cache(cache, ent)
+    return max(0.0, total_usd - float(ent.get("base") or 0.0))
+
+
 # --- Codex CLI quota + session usage -----------------------------------------
 
 def parse_codex_snapshot(lines: list[str]) -> dict | None:
@@ -479,7 +540,7 @@ def main() -> int:
         snap, usage = codex_status()
         lines.append(fmt_codex(snap, usage, rate))
     if CFG["lines"]["cost"]:
-        session_usd = (data.get("cost") or {}).get("total_cost_usd")
+        session_usd = session_cost_after_clear(data, (data.get("cost") or {}).get("total_cost_usd"))
         session_tok = None
         if "total_input_tokens" in cw or "total_output_tokens" in cw:
             session_tok = (cw.get("total_input_tokens") or 0) + (cw.get("total_output_tokens") or 0)
