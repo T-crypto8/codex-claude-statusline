@@ -79,10 +79,14 @@ cp ~/.claude-statusline/config.example.json ~/.config/claude-statusline/config.j
 
 ## 残量予測 — 使うほど自分のペースを学習
 
-5h / 7d 制限がいつ尽きるかを statusline が予測します:
+5h / 7d 制限がいつ尽きるかを statusline が予測します — Claude 行と Codex 行の両方で:
 
 - `🕐5h 83%⚠️~14:10` — 80% 以上 (または使用 50% 以上で窓内枯渇が見込まれる時)
   に枯渇予想時刻つきの警告が出ます。
+- Codex の 5h/7d ブロックも同じ予測が効きます (窓長は rollout 自身の
+  `window_minutes` から取得)。Codex を使っていない間は rollout が止まって
+  データが古くなるため、その間のスナップショットは記録しません — 放置した
+  午後が「burn 0%/h」という嘘を profile に学習させない設計です。
 - デフォルトは quiet: 平常時は何も追加表示しないので「出ている = 意味がある」。
   `forecast.mode` を `"always"` にすると算出できる時は常に `→~HH:MM` を表示、
   `"off"` で無効化。

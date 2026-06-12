@@ -82,10 +82,15 @@ cp ~/.claude-statusline/config.example.json ~/.config/claude-statusline/config.j
 
 ## Quota forecast — it learns your pace
 
-The statusline predicts when your 5h / 7d limits will run dry:
+The statusline predicts when your 5h / 7d limits will run dry — on the Claude
+line *and* the Codex line:
 
 - `🕐5h 83%⚠️~14:10` — at/above 80% (or when depletion is projected inside the
   window at 50%+ usage), a warning with the estimated depletion time appears.
+- The Codex 5h/7d blocks get the same forecast (window length comes from the
+  rollout's own `window_minutes`). While Codex sits idle its rollout data goes
+  stale, so those snapshots are skipped — an idle afternoon never teaches the
+  profile a fake 0%/h burn rate.
 - Quiet by default: nothing extra is rendered in the normal range, so a badge
   showing up *means* something. Set `forecast.mode` to `"always"` to render a
   `→~HH:MM` ETA whenever one can be computed, or `"off"` to disable.

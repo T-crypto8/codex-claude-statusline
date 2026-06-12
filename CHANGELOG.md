@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.4.0 — 2026-06-12
+
+- **Codex depletion forecast.** The Codex 5h/7d blocks now use the same
+  forecast machinery as the Claude line: `⚠️~HH:MM` at 80%+ usage or when
+  depletion is projected inside the window, learned hour-of-day burn profile
+  (`codex_5h` / `codex_7d`) with linear extrapolation until enough data
+  accumulates. Window length comes from the rollout's own `window_minutes`.
+- Stale-rollout guard: while Codex is idle its rollout stops updating, so
+  snapshots older than 10 minutes are not recorded — idle time never teaches
+  the profile a fake 0%/h burn rate.
+- 4 new tests (33 total).
+
 ## v0.3.0 — 2026-06-12
 
 - **Quota depletion forecast.** 5h/7d limits show `⚠️~HH:MM` when usage hits

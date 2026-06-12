@@ -203,5 +203,71 @@ class TestQuotaForecast(unittest.TestCase):
         self.assertEqual(sl.quota_suffix(block, 5 * 3600, now=self.base), "")
 
 
+class TestCodexForecast(unittest.TestCase):
+    """Codex 5h/7d depletion forecast: same machinery as the Claude blocks."""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmp.name)
+        self._orig = (sl.CACHE_DIR, sl.STATE_DIR, sl.QUOTA_SNAP_LOG, sl.CFG["forecast"])
+        sl.CACHE_DIR = tmp / "cache"
+        sl.STATE_DIR = tmp / "state"
+        sl.QUOTA_SNAP_LOG = tmp / "state" / "snaps.jsonl"
+        sl.CFG["forecast"] = dict(sl.DEFAULTS["forecast"])
+
+    def tearDown(self):
+        sl.CACHE_DIR, sl.STATE_DIR, sl.QUOTA_SNAP_LOG, sl.CFG["forecast"] = self._orig
+        self._tmp.cleanup()
+
+    def test_warn_via_linear_fallback(self):
+        import time as _time
+        now = _time.time()
+        out = sl.fmt_codex(
+            {"primary": {"used_percent": 85.0, "window_minutes": 300,
+                         "resets_at": now + 4 * 3600}},
+            None, 150.0,
+        )
+        self.assertIn(sl.ICON["warn"], out)  # >=80% + projected in-window depletion
+        self.assertIn("~", out)
+
+    def test_quiet_in_normal_range(self):
+        import time as _time
+        now = _time.time()
+        out = sl.fmt_codex(
+            {"primary": {"used_percent": 48.0, "window_minutes": 300,
+                         "resets_at": now + 4 * 3600}},
+            None, 150.0,
+        )
+        self.assertNotIn(sl.ICON["warn"], out)
+
+    def test_snap_age_parses_iso(self):
+        from datetime import datetime
+        ts = datetime.now().astimezone().isoformat()
+        age = sl.codex_snap_age({"ts": ts})
+        self.assertIsNotNone(age)
+        self.assertLess(age, 60)
+        self.assertIsNone(sl.codex_snap_age({"ts": "garbage"}))
+        self.assertIsNone(sl.codex_snap_age(None))
+
+    def test_snapshot_records_codex_only_when_fresh(self):
+        from datetime import datetime, timedelta
+        fresh = {"ts": datetime.now().astimezone().isoformat(),
+                 "primary": {"used_percent": 48.0, "resets_at": 1.0},
+                 "secondary": {"used_percent": 12.0, "resets_at": 2.0}}
+        sl.snapshot_quota({}, fresh)
+        rec = json.loads(sl.QUOTA_SNAP_LOG.read_text().splitlines()[-1])
+        self.assertEqual(rec["codex_5h"]["pct"], 48.0)
+        self.assertEqual(rec["codex_7d"]["pct"], 12.0)
+
+        # a stale rollout (idle Codex) must not teach a fake 0%/h burn
+        sl.CACHE_DIR = Path(self._tmp.name) / "cache2"  # reset the throttle mark
+        sl.QUOTA_SNAP_LOG = Path(self._tmp.name) / "state" / "snaps2.jsonl"
+        old = {"ts": (datetime.now().astimezone() - timedelta(hours=2)).isoformat(),
+               "primary": {"used_percent": 48.0, "resets_at": 1.0}}
+        sl.snapshot_quota({}, old)
+        self.assertFalse(sl.QUOTA_SNAP_LOG.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

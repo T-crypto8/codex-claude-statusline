@@ -235,21 +235,43 @@ def git_branch(cwd: str) -> str | None:
 
 # --- quota forecast (local statistics only; no LLM, no network) -----------------
 
-def snapshot_quota(limits: dict) -> None:
+CODEX_SNAP_FRESH_SEC = 600  # skip stale rollouts so an idle Codex never teaches a fake 0%/h burn
+
+
+def codex_snap_age(snap: dict | None) -> float | None:
+    """Age in seconds of a Codex rollout snapshot; None when ts is missing/unparseable."""
+    if not isinstance(snap, dict):
+        return None
+    try:
+        dt = datetime.fromisoformat(str(snap.get("ts")).replace("Z", "+00:00"))
+        return time.time() - dt.timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def snapshot_quota(limits: dict, codex_snap: dict | None = None) -> None:
     """Accumulate 5h/7d usage snapshots (percentages only) for the burn profile.
 
+    Claude blocks come fresh from the harness payload; Codex blocks are read from
+    the latest rollout and are only recorded while that rollout is fresh.
     Throttled to one line per SNAP_THROTTLE_SEC; the file is rotated to its
     newest tail when it exceeds SNAP_MAX_BYTES. Data never leaves the machine.
     """
-    if not limits or CFG["forecast"]["mode"] == "off":
+    if (not limits and not codex_snap) or CFG["forecast"]["mode"] == "off":
         return
     if _read_cache(CACHE_DIR / "quota_snap_mark.json", SNAP_THROTTLE_SEC):
         return
     rec: dict = {"ts": round(time.time(), 1)}
     for key in ("five_hour", "seven_day"):
-        b = limits.get(key)
+        b = (limits or {}).get(key)
         if isinstance(b, dict):
             rec[key] = {"pct": b.get("used_percentage"), "resets_at": b.get("resets_at")}
+    age = codex_snap_age(codex_snap)
+    if age is not None and age <= CODEX_SNAP_FRESH_SEC:
+        for key, blk in (("codex_5h", "primary"), ("codex_7d", "secondary")):
+            b = codex_snap.get(blk)
+            if isinstance(b, dict) and isinstance(b.get("used_percent"), (int, float)):
+                rec[key] = {"pct": b.get("used_percent"), "resets_at": b.get("resets_at")}
     if len(rec) == 1:
         return
     try:
@@ -486,7 +508,11 @@ def parse_codex_snapshot(lines: list[str]) -> dict | None:
             continue
         rl = (d.get("payload") or {}).get("rate_limits") or {}
         if isinstance(rl.get("primary"), dict):
-            return {"primary": rl["primary"], "secondary": rl.get("secondary")}
+            return {
+                "primary": rl["primary"],
+                "secondary": rl.get("secondary"),
+                "ts": d.get("timestamp"),
+            }
     return None
 
 
@@ -542,9 +568,9 @@ def fmt_codex(snap: dict | None, usage: dict | None, rate: float) -> str:
         parts[0] += " —"
     else:
         now = time.time()
-        for icon, label, key in (
-            (ICON["limit_5h"], "5h", "primary"),
-            (ICON["limit_7d"], "7d", "secondary"),
+        for icon, label, key, profile_key, default_window in (
+            (ICON["limit_5h"], "5h", "primary", "codex_5h", 5 * 3600),
+            (ICON["limit_7d"], "7d", "secondary", "codex_7d", 7 * 86400),
         ):
             block = snap.get(key)
             if not isinstance(block, dict):
@@ -555,9 +581,14 @@ def fmt_codex(snap: dict | None, usage: dict | None, rate: float) -> str:
                 # unknown until the next request starts a new rolling window
                 parts.append(f"{icon}{label} {LABEL['recovered']}")
             else:
+                window_sec = (block.get("window_minutes") or 0) * 60 or default_window
+                suffix = quota_suffix(
+                    {"used_percentage": block.get("used_percent"), "resets_at": resets},
+                    window_sec, now=now, profile_key=profile_key,
+                )
                 reset_s = fmt_reset(resets)
                 parts.append(
-                    f"{icon}{label} {block.get('used_percent', 0):.0f}%"
+                    f"{icon}{label} {block.get('used_percent', 0):.0f}%{suffix}"
                     f"{(' ' + reset_s) if reset_s else ''}"
                 )
     if usage:
@@ -734,7 +765,10 @@ def main() -> int:
         ctx_warn = ICON["warn"] if warn_pct and ctx_pct >= warn_pct else ""
         line2.append(f"{ICON['context']}{ctx_pct:.0f}%{ctx_warn}")
     limits = data.get("rate_limits") or {}
-    snapshot_quota(limits)
+    codex_snap = codex_usage = None
+    if CFG["lines"]["codex"]:
+        codex_snap, codex_usage = codex_status()
+    snapshot_quota(limits, codex_snap)
     for part in (
         fmt_limit(ICON["limit_5h"], "5h", limits.get("five_hour"), 5 * 3600, "five_hour"),
         fmt_limit(ICON["limit_7d"], "7d", limits.get("seven_day"), 7 * 86400, "seven_day"),
@@ -746,8 +780,7 @@ def main() -> int:
 
     rate = fx_rate()
     if CFG["lines"]["codex"]:
-        snap, usage = codex_status()
-        lines.append(fmt_codex(snap, usage, rate))
+        lines.append(fmt_codex(codex_snap, codex_usage, rate))
     if CFG["lines"]["cost"]:
         session_usd = session_cost_after_clear(data, (data.get("cost") or {}).get("total_cost_usd"))
         session_tok = None
