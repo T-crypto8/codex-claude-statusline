@@ -29,7 +29,8 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime
+from collections import defaultdict
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # --- configuration ----------------------------------------------------------
@@ -49,6 +50,8 @@ DEFAULTS: dict = {
         "busy": "●",            # ●
         "idle": "○",            # ○
         "reset": "↺",           # ↺
+        "warn": "⚠️",           # ⚠️
+        "forecast": "→",        # →
     },
     "labels": {
         "session": "session",
@@ -75,9 +78,29 @@ DEFAULTS: dict = {
     # Codex pricing (USD per 1M tokens) used for the rough session estimate.
     "codex_pricing": {"input": 1.25, "cached_input": 0.125, "output": 10.0},
     "cache_ttl": {"fx_hours": 12, "daily_seconds": 60, "codex_seconds": 120},
+    # Quota depletion forecast. The statusline learns your hour-of-day burn
+    # rate from locally accumulated snapshots (percentages only, no content,
+    # never leaves your machine) and falls back to linear extrapolation until
+    # enough history exists (~2h of active use).
+    #   mode: "warn"   show ⚠️~HH:MM only above thresholds (quiet default)
+    #         "always" additionally show →~HH:MM whenever depletion is projected
+    #         "off"    disable forecast and snapshot collection
+    "forecast": {
+        "mode": "warn",
+        "warn_percent": 80,
+        "depletion_floor_percent": 50,
+    },
+    "git_dirty": True,           # Δn next to the branch (tracked changes only)
+    "context_warn_percent": 80,  # ⚠️ on the context gauge at/above this (0 = off)
 }
 
 CACHE_DIR = Path(tempfile.gettempdir()) / "claude-statusline"
+STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))) / "claude-statusline"
+QUOTA_SNAP_LOG = STATE_DIR / "quota_snapshots.jsonl"  # {ts, five_hour/seven_day: {pct, resets_at}} only
+SNAP_THROTTLE_SEC = 300
+SNAP_MAX_BYTES = 4_000_000  # rotate to the newest tail when exceeded
+MIN_PROFILE_SAMPLES = 24    # ~2h of active use at the 300s throttle
+PROFILE_TTL_SEC = 1800
 CODEX_SESS_DIR = Path.home() / ".codex" / "sessions"
 CLAUDE_SESS_DIR = Path.home() / ".claude" / "sessions"
 CLAUDE_PROJ_DIR = Path.home() / ".claude" / "projects"
@@ -208,6 +231,185 @@ def git_branch(cwd: str) -> str | None:
         return branch if out.returncode == 0 and branch else None
     except Exception:
         return None
+
+
+# --- quota forecast (local statistics only; no LLM, no network) -----------------
+
+def snapshot_quota(limits: dict) -> None:
+    """Accumulate 5h/7d usage snapshots (percentages only) for the burn profile.
+
+    Throttled to one line per SNAP_THROTTLE_SEC; the file is rotated to its
+    newest tail when it exceeds SNAP_MAX_BYTES. Data never leaves the machine.
+    """
+    if not limits or CFG["forecast"]["mode"] == "off":
+        return
+    if _read_cache(CACHE_DIR / "quota_snap_mark.json", SNAP_THROTTLE_SEC):
+        return
+    rec: dict = {"ts": round(time.time(), 1)}
+    for key in ("five_hour", "seven_day"):
+        b = limits.get(key)
+        if isinstance(b, dict):
+            rec[key] = {"pct": b.get("used_percentage"), "resets_at": b.get("resets_at")}
+    if len(rec) == 1:
+        return
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        with QUOTA_SNAP_LOG.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
+        if QUOTA_SNAP_LOG.stat().st_size > SNAP_MAX_BYTES:
+            tail = _tail_text(QUOTA_SNAP_LOG, SNAP_MAX_BYTES // 2)
+            tail = tail[tail.find("\n") + 1:]  # drop a possibly partial first line
+            tmp = QUOTA_SNAP_LOG.with_suffix(".tmp")
+            tmp.write_text(tail, encoding="utf-8")
+            tmp.replace(QUOTA_SNAP_LOG)
+    except OSError:
+        return
+    _write_cache(CACHE_DIR / "quota_snap_mark.json", {})
+
+
+def burn_profile(key: str) -> dict | None:
+    """Learn the hour-of-day burn rate (%/h) from accumulated snapshots.
+
+    Averages pct deltas of adjacent snapshot pairs into hour buckets; pairs
+    crossing a window reset (negative delta) or further than 1h apart are
+    discarded. Returns None until MIN_PROFILE_SAMPLES pairs exist, in which
+    case the caller falls back to linear extrapolation. Pure statistics.
+    """
+    cache = CACHE_DIR / f"burn_profile_{key}.json"
+    cached = _read_cache(cache, PROFILE_TTL_SEC)
+    if cached is not None and "profile" in cached:
+        return cached["profile"]
+    try:
+        text = _tail_text(QUOTA_SNAP_LOG, 512_000)
+    except OSError:
+        return None
+    sums: dict[int, float] = defaultdict(float)
+    counts: dict[int, int] = defaultdict(int)
+    total = 0.0
+    n = 0
+    prev: tuple[float, float, object] | None = None
+    for line in text.splitlines():
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        ts = d.get("ts")
+        b = d.get(key)
+        if not isinstance(ts, (int, float)) or not isinstance(b, dict):
+            continue
+        pct = b.get("pct")
+        if not isinstance(pct, (int, float)):
+            prev = None
+            continue
+        cur = (float(ts), float(pct), b.get("resets_at"))
+        if prev is not None:
+            dt = cur[0] - prev[0]
+            dp = cur[1] - prev[1]
+            same_window = (cur[2] == prev[2]) if (cur[2] and prev[2]) else dp >= 0
+            if 0 < dt <= 3600 and dp >= 0 and same_window:
+                rate = dp / dt * 3600  # %/h
+                hour = datetime.fromtimestamp(prev[0]).hour
+                sums[hour] += rate
+                counts[hour] += 1
+                total += rate
+                n += 1
+        prev = cur
+    profile = None
+    if n >= MIN_PROFILE_SAMPLES and total > 0:
+        profile = {
+            "hour_rates": {str(h): sums[h] / counts[h] for h in counts},
+            "overall": total / n,
+            "samples": n,
+        }
+    _write_cache(cache, {"profile": profile})
+    return profile
+
+
+def project_depletion(pct: float, now: float, resets: float, profile: dict) -> float | None:
+    """Walk the learned hourly rates forward; return the 100% ETA, else None."""
+    hour_rates = profile.get("hour_rates") or {}
+    overall = profile.get("overall") or 0
+    if overall <= 0:
+        return None
+    remaining = 100.0 - pct
+    t = now
+    while t < resets:
+        rate = hour_rates.get(str(datetime.fromtimestamp(t).hour), overall)
+        next_hour = (
+            datetime.fromtimestamp(t).replace(minute=0, second=0, microsecond=0)
+            + timedelta(hours=1)
+        ).timestamp()
+        step = min(next_hour, resets) - t
+        burn = rate * step / 3600
+        if rate > 0 and burn >= remaining:
+            return t + remaining / rate * 3600
+        remaining -= burn
+        t = min(next_hour, resets)
+    return None
+
+
+def quota_suffix(block: dict | None, window_sec: float, now: float | None = None,
+                 profile_key: str | None = None) -> str:
+    """Forecast suffix for a rate-limit block, honoring CFG["forecast"].
+
+    "warn" (default): ⚠️~HH:MM only at/above warn_percent, or when depletion is
+    projected inside the window at/above depletion_floor_percent. Quiet otherwise.
+    "always": additionally →~HH:MM whenever a depletion ETA exists.
+    Learned profile when available, linear extrapolation before that (the first
+    10% of the window is ignored to avoid jumpy early estimates).
+    """
+    fc = CFG["forecast"]
+    if fc["mode"] == "off" or not isinstance(block, dict):
+        return ""
+    pct = block.get("used_percentage")
+    if not isinstance(pct, (int, float)):
+        return ""
+    now = now or time.time()
+    depleted_at: float | None = None
+    resets = block.get("resets_at")
+    if isinstance(resets, (int, float)) and resets > now and 0 < pct < 100:
+        profile = burn_profile(profile_key) if profile_key else None
+        if profile:
+            depleted_at = project_depletion(float(pct), now, float(resets), profile)
+        else:
+            elapsed = now - (resets - window_sec)
+            if elapsed >= window_sec * 0.1:
+                projected = now + (100 - pct) * elapsed / pct
+                if projected < resets:
+                    depleted_at = projected
+    eta = f"~{datetime.fromtimestamp(depleted_at):%H:%M}" if depleted_at else ""
+    if pct >= fc["warn_percent"]:
+        return ICON["warn"] + eta
+    if depleted_at is not None and pct >= fc["depletion_floor_percent"]:
+        return ICON["warn"] + eta
+    if depleted_at is not None and fc["mode"] == "always":
+        return ICON["forecast"] + eta
+    return ""
+
+
+def git_dirty(cwd: str) -> int | None:
+    """Tracked modified/added file count (cached). Untracked and deletions are
+    excluded so long-lived repos with pending cleanups don't pin the badge on."""
+    cache = CACHE_DIR / "git_dirty.json"
+    cached = _read_cache(cache, 30)
+    if cached is not None and cached.get("cwd") == cwd:
+        return cached.get("n")
+    try:
+        out = subprocess.run(
+            ["git", "-C", cwd, "status", "--porcelain", "--no-renames", "--untracked-files=no"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if out.returncode == 0:
+            n: int | None = sum(
+                1 for line in out.stdout.splitlines()
+                if line[:2].strip() and "D" not in line[:2]
+            )
+        else:
+            n = None
+    except Exception:
+        n = None
+    _write_cache(cache, {"cwd": cwd, "n": n})
+    return n
 
 
 # --- /clear-aware session cost -------------------------------------------------
@@ -466,14 +668,16 @@ def fmt_reset(epoch: object) -> str:
     return f"{ICON['reset']}{dt.month}/{dt.day} {dt:%H:%M}"
 
 
-def fmt_limit(icon: str, label: str, block: dict | None) -> str | None:
+def fmt_limit(icon: str, label: str, block: dict | None, window_sec: float | None = None,
+              profile_key: str | None = None) -> str | None:
     if not isinstance(block, dict):
         return None
     pct = block.get("used_percentage")
     if pct is None:
         return None
+    suffix = quota_suffix(block, window_sec, profile_key=profile_key) if window_sec else ""
     reset = fmt_reset(block.get("resets_at"))
-    return f"{icon}{label} {pct:.0f}%{(' ' + reset) if reset else ''}"
+    return f"{icon}{label} {pct:.0f}%{suffix}{(' ' + reset) if reset else ''}"
 
 
 def fmt_tok(tok: int | None) -> str:
@@ -516,19 +720,24 @@ def main() -> int:
     line1 = [f"{ICON['prefix']} {ICON['dir']}{dir_name}"]
     branch = git_branch(cwd)
     if branch:
-        line1.append(f"{ICON['branch']} {branch}")
+        dirty = git_dirty(cwd) if CFG["git_dirty"] else 0
+        line1.append(f"{ICON['branch']} {branch}" + (f" Δ{dirty}" if dirty else ""))
 
     model = (data.get("model") or {}).get("display_name") or "?"
     line2 = [f"{ICON['model']}{model}"]
     cw = data.get("context_window") or {}
     ctx_pct = cw.get("used_percentage")
-    line2.append(
-        f"{ICON['context']}{ctx_pct:.0f}%" if ctx_pct is not None else f"{ICON['context']}—"
-    )
+    if ctx_pct is None:
+        line2.append(f"{ICON['context']}—")
+    else:
+        warn_pct = CFG["context_warn_percent"]
+        ctx_warn = ICON["warn"] if warn_pct and ctx_pct >= warn_pct else ""
+        line2.append(f"{ICON['context']}{ctx_pct:.0f}%{ctx_warn}")
     limits = data.get("rate_limits") or {}
+    snapshot_quota(limits)
     for part in (
-        fmt_limit(ICON["limit_5h"], "5h", limits.get("five_hour")),
-        fmt_limit(ICON["limit_7d"], "7d", limits.get("seven_day")),
+        fmt_limit(ICON["limit_5h"], "5h", limits.get("five_hour"), 5 * 3600, "five_hour"),
+        fmt_limit(ICON["limit_7d"], "7d", limits.get("seven_day"), 7 * 86400, "seven_day"),
     ):
         if part:
             line2.append(part)

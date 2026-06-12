@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.3.0 — 2026-06-12
+
+- **Quota depletion forecast.** 5h/7d limits show `⚠️~HH:MM` when usage hits
+  80% or depletion is projected inside the window (50%+ usage). Quiet by
+  default; `forecast.mode: "always"` renders a `→~HH:MM` ETA whenever
+  available, `"off"` disables.
+- **It learns your pace — locally.** Snapshots (timestamps + percentages only)
+  accumulate in `~/.local/state/claude-statusline/`; after ~2h of active use,
+  predictions use your personal hour-of-day burn profile instead of linear
+  extrapolation. Pure statistics: no LLM calls, no network, no content.
+- `Δn` badge next to the branch (uncommitted tracked changes; untracked and
+  deletions excluded) — `git_dirty: false` to disable.
+- `⚠️` on the context gauge at 80%+ (auto-compact approaching) —
+  `context_warn_percent: 0` to disable.
+- 6 new tests (29 total).
+
 ## v0.2.0 — 2026-06-12
 
 - **Session cost now resets on `/clear`.** `cost.total_cost_usd` from Claude

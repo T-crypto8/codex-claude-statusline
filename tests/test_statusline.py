@@ -131,5 +131,77 @@ class TestSessionCostAfterClear(unittest.TestCase):
         self.assertIsNone(sl.session_cost_after_clear({"session_id": "x"}, None))
 
 
+class TestQuotaForecast(unittest.TestCase):
+    """Learned burn profile + depletion projection + quiet/always modes."""
+
+    def setUp(self):
+        import tempfile
+        from datetime import datetime
+        self._tmp = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmp.name)
+        self._orig = (sl.CACHE_DIR, sl.QUOTA_SNAP_LOG, sl.CFG["forecast"])
+        sl.CACHE_DIR = tmp / "cache"
+        sl.QUOTA_SNAP_LOG = tmp / "snaps.jsonl"
+        sl.CFG["forecast"] = dict(sl.DEFAULTS["forecast"])
+        self.base = datetime(2026, 6, 12, 9, 0).timestamp()
+
+    def tearDown(self):
+        sl.CACHE_DIR, sl.QUOTA_SNAP_LOG, sl.CFG["forecast"] = self._orig
+        self._tmp.cleanup()
+
+    def _write_snaps(self, hours, rate_per_h, resets):
+        lines, pct, ts = [], 10.0, self.base
+        for _ in range(int(hours * 12)):
+            lines.append(json.dumps({"ts": ts, "five_hour": {"pct": pct, "resets_at": resets}}))
+            ts += 300
+            pct = min(99.0, pct + rate_per_h / 12)
+        sl.QUOTA_SNAP_LOG.parent.mkdir(parents=True, exist_ok=True)
+        sl.QUOTA_SNAP_LOG.write_text("\n".join(lines) + "\n")
+
+    def test_profile_learned_from_snapshots(self):
+        self._write_snaps(3, 12.0, self.base + 5 * 3600)
+        prof = sl.burn_profile("five_hour")
+        self.assertIsNotNone(prof)
+        self.assertGreaterEqual(prof["samples"], sl.MIN_PROFILE_SAMPLES)
+        self.assertAlmostEqual(prof["overall"], 12.0, delta=0.7)
+
+    def test_insufficient_data_returns_none(self):
+        self._write_snaps(0.5, 12.0, self.base + 5 * 3600)
+        self.assertIsNone(sl.burn_profile("five_hour"))
+
+    def test_project_depletion_hourly_walk(self):
+        from datetime import datetime
+        profile = {"hour_rates": {"9": 30.0, "10": 6.0}, "overall": 18.0, "samples": 48}
+        now = self.base  # 09:00
+        dep = sl.project_depletion(80.0, now, now + 5 * 3600, profile)
+        self.assertIsNotNone(dep)
+        self.assertLess(abs(dep - (now + 40 * 60)), 60)  # 20% / 30%/h = 40min
+        slow = {"hour_rates": {}, "overall": 2.0, "samples": 48}
+        self.assertIsNone(sl.project_depletion(80.0, now, now + 3600, slow))
+
+    def test_quiet_mode_thresholds(self):
+        now = self.base + 3600
+        # normal usage, no profile, linear projection stays inside? 31% @1h of 5h:
+        # projects depletion but floor (50%) keeps it quiet
+        block = {"used_percentage": 31, "resets_at": now + 4 * 3600}
+        self.assertEqual(sl.quota_suffix(block, 5 * 3600, now=now), "")
+        # >= 80% always warns
+        block = {"used_percentage": 85, "resets_at": now + 4 * 3600}
+        self.assertTrue(sl.quota_suffix(block, 5 * 3600, now=now).startswith(sl.ICON["warn"]))
+
+    def test_always_mode_shows_eta_without_warn(self):
+        sl.CFG["forecast"]["mode"] = "always"
+        now = self.base + 3600
+        block = {"used_percentage": 31, "resets_at": now + 4 * 3600}
+        out = sl.quota_suffix(block, 5 * 3600, now=now)
+        self.assertTrue(out.startswith(sl.ICON["forecast"]))
+        self.assertIn("~", out)
+
+    def test_off_mode_disables(self):
+        sl.CFG["forecast"]["mode"] = "off"
+        block = {"used_percentage": 95, "resets_at": self.base + 3600}
+        self.assertEqual(sl.quota_suffix(block, 5 * 3600, now=self.base), "")
+
+
 if __name__ == "__main__":
     unittest.main()

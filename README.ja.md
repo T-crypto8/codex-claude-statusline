@@ -77,6 +77,22 @@ cp ~/.claude-statusline/config.example.json ~/.config/claude-statusline/config.j
 - 設定パス上書き: `CLAUDE_STATUSLINE_CONFIG=/path/to/config.json`
 - 価格表上書き: スクリプト隣に `pricing.json` を置くか `CLAUDE_STATUSLINE_PRICING`
 
+## 残量予測 — 使うほど自分のペースを学習
+
+5h / 7d 制限がいつ尽きるかを statusline が予測します:
+
+- `🕐5h 83%⚠️~14:10` — 80% 以上 (または使用 50% 以上で窓内枯渇が見込まれる時)
+  に枯渇予想時刻つきの警告が出ます。
+- デフォルトは quiet: 平常時は何も追加表示しないので「出ている = 意味がある」。
+  `forecast.mode` を `"always"` にすると算出できる時は常に `→~HH:MM` を表示、
+  `"off"` で無効化。
+- **学習します。** 使用量スナップショット (timestamp と % のみ — プロンプトも
+  ファイルパスも含まない) を `~/.local/state/claude-statusline/quota_snapshots.jsonl`
+  にローカル蓄積。実使用 2 時間ほどで線形外挿から時間帯別の個人 burn profile に
+  切り替わります — 純粋なローカル統計で、LLM 呼び出しもネットワーク送信もゼロ。
+- おまけ: branch 横の `Δn` (未コミットの tracked 変更数) と、context 80% 超の
+  `⚠️` (auto-compact 接近)。どちらも設定可能。
+
 ## Codex CLI と使う(Claude Code 不要)
 
 3行目は最初から `~/.codex/sessions` を読んで Codex の残り枠とセッションコストを表示します。Codex メインの人は単体起動でそのまま計器盤になります:

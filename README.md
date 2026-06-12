@@ -80,6 +80,24 @@ cp ~/.claude-statusline/config.example.json ~/.config/claude-statusline/config.j
 - Config path override: `CLAUDE_STATUSLINE_CONFIG=/path/to/config.json`.
 - Pricing override: drop a `pricing.json` next to the scripts (same shape as `DEFAULT_PRICING` in `usage_estimate.py`) or set `CLAUDE_STATUSLINE_PRICING`.
 
+## Quota forecast — it learns your pace
+
+The statusline predicts when your 5h / 7d limits will run dry:
+
+- `🕐5h 83%⚠️~14:10` — at/above 80% (or when depletion is projected inside the
+  window at 50%+ usage), a warning with the estimated depletion time appears.
+- Quiet by default: nothing extra is rendered in the normal range, so a badge
+  showing up *means* something. Set `forecast.mode` to `"always"` to render a
+  `→~HH:MM` ETA whenever one can be computed, or `"off"` to disable.
+- **It learns.** Usage snapshots (timestamps and percentages only — no prompts,
+  no file paths, nothing readable) accumulate locally in
+  `~/.local/state/claude-statusline/quota_snapshots.jsonl`. After ~2 hours of
+  active use, predictions switch from linear extrapolation to your personal
+  hour-of-day burn profile — pure local statistics, no LLM calls, no network,
+  nothing leaves your machine.
+- Bonus badges: `Δn` next to the branch (uncommitted tracked changes) and `⚠️`
+  on the context gauge at 80% (auto-compact approaching). Both configurable.
+
 ## Using with Codex CLI (no Claude Code needed)
 
 Line 3 already tracks Codex CLI quota and session cost from `~/.codex/sessions`. If you live in Codex (or anything else), run the cockpit standalone — it detects the missing payload and renders what it can:

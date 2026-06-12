@@ -12,7 +12,9 @@
     "parallel": "🤝",
     "busy": "●",
     "idle": "○",
-    "reset": "↺"
+    "reset": "↺",
+    "warn": "⚠️",
+    "forecast": "→"
   },
   "labels": {
     "session": "session",
@@ -32,7 +34,10 @@
     "fallback_rate": 1.0
   },
   "separator": " │ ",
-  "mask_patterns": ["your-real-name", "your-company-name"],
+  "mask_patterns": [
+    "your-real-name",
+    "your-company-name"
+  ],
   "mask_replacement": "＊",
   "codex_pricing": {
     "input": 1.25,
@@ -43,5 +48,12 @@
     "fx_hours": 12,
     "daily_seconds": 60,
     "codex_seconds": 120
-  }
+  },
+  "forecast": {
+    "mode": "warn",
+    "warn_percent": 80,
+    "depletion_floor_percent": 50
+  },
+  "git_dirty": true,
+  "context_warn_percent": 80
 }
